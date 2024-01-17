@@ -1,6 +1,6 @@
 import os
 import torch
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+#os.environ['PYOPENGL_PLATFORM'] = 'egl'
 import numpy as np
 import pyrender
 import trimesh

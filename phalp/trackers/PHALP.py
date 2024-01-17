@@ -2,9 +2,9 @@ import os
 import traceback
 import warnings
 from pathlib import Path
-
+from tqdm import tqdm
 warnings.filterwarnings('ignore')
-
+from loguru import logger
 import cv2
 import joblib
 import numpy as np
@@ -69,6 +69,12 @@ class PHALP(nn.Module):
         
         # create nessary directories
         self.default_setup()
+        import pickle
+        bbox_path = "/mnt/x/data_repos/rooom_AG/mocap/first_goal_blue.bbox"
+        # bbox_path = "/mnt/x/data_repos/rooom_AG/mocap/first_goal_yello.bbox"
+
+        self.bbox_data = pickle.load(open(bbox_path, "rb"))
+        logger.warning(f"Using bbox data from {bbox_path}")
         
     def setup_hmr(self):
         log.info("Loading HMAR model...")
@@ -176,8 +182,11 @@ class PHALP(nn.Module):
             tracked_frames = []
             final_visuals_dic = {}
             
-            for t_, frame_name in progress_bar(enumerate(list_of_frames), description="Tracking : " + self.cfg.video_seq, total=len(list_of_frames), disable=False):
-                
+            for t_, frame_name in tqdm(enumerate(list_of_frames),
+                                       desc="Tracking : " + self.cfg.video_seq,
+            total=len(list_of_frames)):
+            # for t_, frame_name in progress_bar(enumerate(list_of_frames), description="Tracking : " + self.cfg.video_seq, total=len(list_of_frames), disable=False):
+
                 image_frame               = self.io_manager.read_frame(frame_name)
                 img_height, img_width, _  = image_frame.shape
                 new_image_size            = max(img_height, img_width)
@@ -193,19 +202,24 @@ class PHALP(nn.Module):
                 
                 ############ detection ##############
                 pred_bbox, pred_bbox_pad, pred_masks, pred_scores, pred_classes, gt_tids, gt_annots = self.get_detections(image_frame, frame_name, t_, additional_data, measurments)
-
+                # if len(pred_bbox) == 0:
+                #     logger.warning(f"No detections found in frame {frame_name}")
+                #     continue
                 ############ Run EXTRA models to attach to the detections ##############
                 extra_data = self.run_additional_models(image_frame, pred_bbox, pred_masks, pred_scores, pred_classes, frame_name, t_, measurments, gt_tids, gt_annots)
                 
                 ############ HMAR ##############
                 detections = self.get_human_features(image_frame, pred_masks, pred_bbox, pred_bbox_pad, pred_scores, frame_name, pred_classes, t_, measurments, gt_tids, gt_annots, extra_data)
 
+                breakpoint()
                 ############ tracking ##############
                 self.tracker.predict()
                 self.tracker.update(detections, t_, frame_name, self.cfg.phalp.shot)
 
                 ############ record the results ##############
-                final_visuals_dic.setdefault(frame_name, {'time': t_, 'shot': self.cfg.phalp.shot, 'frame_path': frame_name})
+                final_visuals_dic.setdefault(frame_name, {'time': t_,
+                                                          'shot': self.cfg.phalp.shot,
+                                                          'frame_path': frame_name})
                 if(self.cfg.render.enable): final_visuals_dic[frame_name]['frame'] = image_frame
                 for key_ in visual_store_: final_visuals_dic[frame_name][key_] = []
                 
@@ -249,6 +263,7 @@ class PHALP(nn.Module):
                     for t__ in range(t_, t_+d_):
 
                         frame_key = list_of_frames[t__-self.cfg.phalp.n_init]
+                        # if frame_key not in final_visuals_dic: continue
                         rendered_, f_size = self.visualizer.render_video(final_visuals_dic[frame_key])      
 
                         # save the rendered frame
@@ -262,6 +277,8 @@ class PHALP(nn.Module):
                             del final_visuals_dic[frame_key][tkey_] 
 
             joblib.dump(final_visuals_dic, pkl_path, compress=3)
+            import pickle
+            pickle.dump(final_visuals_dic, open(pkl_path.replace('.pkl', '_python3.pkl'), 'wb'))
             self.io_manager.close_video()
             if(self.cfg.use_gt): joblib.dump(self.tracker.tracked_cost, self.cfg.video.output_dir + '/results/' + str(self.cfg.video_seq) + '_' + str(self.cfg.phalp.start_frame) + '_distance.pkl')
             
@@ -328,20 +345,45 @@ class PHALP(nn.Module):
             pred_classes= instances_people.pred_classes.cpu().numpy()
                                     
         else:
-            outputs     = self.detector(image)   
-            instances   = outputs['instances']
-            instances   = instances[instances.pred_classes==0]
-            instances   = instances[instances.scores>self.cfg.phalp.low_th_c]
 
-            pred_bbox   = instances.pred_boxes.tensor.cpu().numpy()
-            pred_masks  = instances.pred_masks.cpu().numpy()
-            pred_scores = instances.scores.cpu().numpy()
-            pred_classes= instances.pred_classes.cpu().numpy()
-            
+            frame_id = int(Path(frame_name).stem)
+
+            pred_bbox = []
+            pred_scores = []
+            pred_classes = []
+            pred_masks = []
+            for bbox_id in self.bbox_data["players"][frame_id]:
+                c_bbox = self.bbox_data["players"][frame_id][bbox_id]['bbox']
+                pred_bbox.append(c_bbox)
+                pred_scores.append(self.bbox_data["players"][frame_id][bbox_id]['bbox_conf'])
+                pred_classes.append(0)
+                pred_mask = np.zeros((image.shape[0], image.shape[1]))
+                pred_mask[c_bbox[1]:c_bbox[3], c_bbox[0]:c_bbox[2]] = 1
+                pred_masks.append(pred_mask.astype(bool))
+
+            pred_masks = np.array(pred_masks)
+            pred_bbox = np.array(pred_bbox)
+            pred_scores = np.array(pred_scores)
+            pred_classes = np.array(pred_classes)
+
+            # breakpoint()
+            # outputs     = self.detector(image)
+            # instances   = outputs['instances']
+            # instances   = instances[instances.pred_classes==0]
+            # instances   = instances[instances.scores>self.cfg.phalp.low_th_c]
+
+
+            # pred_bbox   = instances.pred_boxes.tensor.cpu().numpy()
+            # pred_masks2= instances.pred_masks.cpu().numpy()
+            # pred_scores = instances.scores.cpu().numpy()
+            # pred_classes= instances.pred_classes.cpu().numpy()
+            #breakpoint()
+
             ground_truth_track_id = [1 for i in list(range(len(pred_scores)))]
             ground_truth_annotations = [[] for i in list(range(len(pred_scores)))]
 
-        return pred_bbox, pred_bbox, pred_masks, pred_scores, pred_classes, ground_truth_track_id, ground_truth_annotations
+        return pred_bbox, pred_bbox, pred_masks, pred_scores, pred_classes,\
+            ground_truth_track_id, ground_truth_annotations
 
     def get_croped_image(self, image, bbox, bbox_pad, seg_mask):
         
